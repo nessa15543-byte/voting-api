@@ -1,12 +1,11 @@
 const path = require("path")
 const fs = require("fs");
-const { stringify } = require("querystring");
 const { hashSync, compareSync } = require("bcrypt");
-const { error } = require("console");
 const { CONFIG } = require("../config/env");
 const { buildResponds } = require("../utils/builder");
 const filepath = path.join(__dirname, "../", "accounts.json")
-const jwt = require("jsonwebtoken")
+const jwt = require("jsonwebtoken");
+const uuidV4 = require("uuid-v4");
 
 const register = (req, res) => {
     try {
@@ -36,20 +35,23 @@ const register = (req, res) => {
             password: hashedpassword,
             firstname,
             lastname,
-            id: Math.floor(Math.round()),
+            id: uuidV4(),
             type: "user",
         };
         //check if file exsit
         if (fs.existsSync(filepath)) {
             const readData = fs.readFileSync(filepath, "utf-8");
             const objData = JSON.parse(readData);
+
             const emailExist = objData.find(x => x.email === email);
 
             if (emailExist) return res.status(400).json({ error: "email already exist" })
-            objData.push(user);
-            const save = fs.writeFileSync(filepath, JSON.stringify([objData]), "utf-8");
+            const others = objData.filter (x => x.email !== email)
+            others.push(user);
 
-            if (save) throw new Error(save);
+            const save = fs.writeFileSync(filepath, JSON.stringify(objData), "utf-8");
+            if (save) throw new Error(save)
+
         } else {
             const save = fs.writeFileSync(filepath, JSON.stringify([user]), "utf-8");
             if (save) throw new Error(save);
@@ -70,9 +72,11 @@ const login = (req, res) => {
         if (password === "" || password.length < 8 || password.length > 10) throw new Error('password must be at least 8 characters');
 
         const data = readFile(filepath);
+        console.log(data)
         if (!data) throw new Error("no record found");
-        const userExist = data.find(x => x.email.toLowerCase() === email.toLowerCase());
-        const others = data.filter(x => x.email.toLowerCase() !== email.toLowerCase() )
+        const userExist = data.find(x => x?.email === email);
+        // console.log(userExist)
+        const others = data.filter(x => x?.email !== email)
         if (!userExist) throw new Error("account does not exist");
         if (!compareSync(password, userExist.password)) throw new Error("incorrect pasword");
 
@@ -89,14 +93,14 @@ const login = (req, res) => {
         const payload = {
             id: userExist.id,
             email,
-            userType: userExist.type,
+            type: userExist.type,
         };
         const userData = buildResponds(userExist);
         //sign access token
-        const accessToken = jwt.sign(payload, CONFIG.ACCESS_TOKEN_SECRET, { expiresIn: "5m" });
-        const refreshToken = jwt.sign(payload, CONFIG.REFRESH_TOKEN_SECRET, { expiresIn: "15m" });
+        const accessToken = jwt.sign(payload, CONFIG.ACCESS_TOKEN_SECRET, { expiresIn: "1m" });
+        const refreshToken = jwt.sign(payload, CONFIG.REFRESH_TOKEN_SECRET, { expiresIn: "2m" });
 
-        userExist.refreshToken = userExist.refreshToken || [];
+        userExist.refreshToken = refreshToken
         others.push(userExist);
 
         const saveRefreshToken = fs.writeFileSync(filepath, JSON.stringify(others), "utf-8");
@@ -122,6 +126,30 @@ const login = (req, res) => {
         res.status(400).json({ error: error.message || "an error occured" })
     }
 }
+const check = (req, res) => {
+    try {
+        let token = req?.cookie?.votin_ex;
+        if (!token) token = req?.headers?.authotization?.split(' ')[1];
+        if (!token) token = req?.headers?.cookie?.split("=")[1];
+        if (!token) throw new Error("you have to login first")
+
+        const data = readFile(filepath);
+        if (!data) throw new Error("no record found");
+        const verify = jwt.verify(token, CONFIG.ACCESS_TOKEN_SECRET)
+        const userExist = data.find(x => x.id === verify.id);
+        if (!userExist.refreshToken){
+
+        }
+
+        res.status(200).json({message: "check successful"});
+    } catch (error) {
+        if(error.name === "TokenExpiredError" || error.message === "you have to login first"){
+        res.clearCookie("voTiN_ex")
+        return res.status(401).json({message: "Access Token expired, generate new access token" })
+    }
+    res.status(400).json({error: error.message || "an error occured"})
+}
+ }
 const readFile = () => {
     let exist;
     if (fs.existsSync(filepath)) {
@@ -206,18 +234,98 @@ const logout =(req, res) => {
         }else throw new Error("you have to login first");
         res.clearCookie("voTiN_ex")
         res.status(200).json({message: "logout successful"});
-
     }catch(error){
         if(error.name === "TokenExpiredError") return res.status(401).json({message: "access token expired, genetate new access token"});
         res.status(400).json({error: error.message || "an error occured"})
     }
 }
 
+const refreshToken = async (req, res) => {
+    try{
+        let token = req?.cookie?.votin_ex;
+        if (!token) token = req?.headers?.authotization?.split(' ')[1];
+        if (!token) token = req?.headers?.cookie?.split("=")[1];
+        const{refreshToken} = req.body;
+
+        if(!refreshToken) return res.status(401).json({msg: "refresh token is required"});
+
+        const data = readFile(filepath)
+        if(!data) throw new Error("no record found");
+
+        const userExist = data.find(x => x.refreshToken === refreshToken);
+        let others = data.filter(x => x.refreshToken !== refreshToken);
+
+        if(!userExist){
+            const check =jwt.decode(refreshToken, CONFIG.REFRESH_TOKEN_SECRET)
+            const finduser = data.find(x => x.id === check.id);
+            others = data.filter(x => x.id !== check.id);
+            if(finduser){
+                delete finduser.refreshToken;
+                others.push(finduser);
+                const save = fs.writeFileSync(filepath,JSON.stringify(others), "utf-8");
+                if(save) throw new Error("save");
+            }
+            res.clearCookie("voTiN_ex");
+            return res.status(401).json({error: "token reuse detected"})
+        }else{
+            jwt.verify(refreshToken,CONFIG.REFRESH_TOKEN_SECRET,async (err, decoded)=>{
+                if(err){
+                    delete userExist.refreshToken;
+                    others.push(userExist);
+                      const save = fs.writeFileSync(filepath,JSON.stringify(others), "utf-8");
+                      if(save) throw new Error(save);
+                      res.clearCookie("voTiN_ex");
+                      return res.status(200).json({error: "please login"})
+                }
+            });
+            const payload = {
+                id: userExist.id,
+                email: userExist.email,
+                type: userExist.type}
+                const accessToken = jwt.sign(payload, CONFIG.ACCESS_TOKEN_SECRET,{expiresIn: "1m"})
+                res.clearCookie("votin_ex");
+                res.cookie("voTin_ex", accessToken,{
+                    httpOnly: false,
+                    secure: true,
+                    sameSite: 'none',
+                });
+                res.status(200).json({message: "access token generate successfully", token: accessToken});
+            }
+        
+    }catch(error){
+        if(error.name === "TokenExpiredError") return res.status(401).json({message: "access token expired, genetate new access token"});
+        res.status(400).json({error: error.message || "an error occured"})
+    }
+}
+// const refreshToken =(res,req) =>{
+//     try{
+//            let token = req?.cookie?.votin_ex;
+//         if (!token) token = req?.headers?.authotization?.split(' ')[1];
+//         if (!token) token = req?.headers?.cookie?.split("=")[1
+
+//         const user = jwt.verify(token, CONFIG.REFRESH_TOKEN_SECRET);
+//          if(!user) return res.status(401).json({msg: "Expired! generate a new acess token"});
+//          const userExist = data.find(x => x.id === user.id)
+//          const others = data.filter(x => x.id !== user.id)
+//           if(userExist){
+//             const newAccesstoken = generateAccesstoken({
+//                 id: userExist.id
+//             })
+//             others.push(userExist);
+//             const save = fs.writeFileSync(filepath,JSON.stringify(others), "utf-8");
+//             return newAccesstoken
+//         }
+//     }catch(error){
+//         if(error.name === "TokenExpiredError")return res.status(401).json({message:"refresh token expired, login again"})
+//     }
+// }
 module.exports = {
     register,
     login,
     forgotpassword,
     getAccounts,
     readFile,
-    logout
+    logout,
+    refreshToken,
+    check
 } 
